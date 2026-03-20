@@ -656,7 +656,7 @@ async fn main() -> anyhow::Result<()> {
         .with_state(app_state.clone());
 
     // Run our application
-    let port = env::var("PORT").unwrap_or_else(|_| "8788".to_string());
+    let port = env::var("PORT").unwrap_or_else(|_| "8787".to_string());
     let addr = format!("0.0.0.0:{}", port).parse::<SocketAddr>()?;
 
     println!("🚀 qwen3.5-scw-router listening on http://{}", addr);

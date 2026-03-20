@@ -1,26 +1,22 @@
-FROM rust:1.78-alpine as builder
+FROM rust:1.75-alpine as builder
 
-# Install build dependencies
-RUN apk add --no-cache \
-    musl-dev \
-    gcc \
-    openssl-dev \
-    pkgconf
+# Install required packages
+RUN apk add --no-cache musl-dev
 
-# Set working directory
+# Create app directory
 WORKDIR /app
 
-# Copy manifest and lock file
-COPY Cargo.toml Cargo.lock ./
+# Copy Cargo files
+COPY Cargo.toml .
 
-# Create a dummy main.rs to build dependencies
-RUN mkdir src && echo 'fn main() { println!("dummy"); }' > src/main.rs
+# Create a dummy src directory for build
+RUN mkdir -p src && echo 'fn main() {}' > src/main.rs
 
-# Build dependencies
+# Download dependencies
 RUN cargo build --release
 
-# Remove dummy file
-RUN rm -f src/main.rs
+# Remove the dummy src directory
+RUN rm -rf src
 
 # Copy source code
 COPY src ./src
@@ -34,32 +30,14 @@ FROM alpine:latest
 # Install CA certificates
 RUN apk --no-cache add ca-certificates
 
-# Create non-root user
-RUN addgroup -g 1001 -S appuser && \
-    adduser -u 1001 -S appuser -G appuser
-
-# Set working directory
-WORKDIR /home/appuser
+# Create app directory
+WORKDIR /app
 
 # Copy the binary from builder stage
-COPY --from=builder /app/target/release/codex-router-rust ./codex-router-rust
+COPY --from=builder /app/target/release/codex-router .
 
-# Change ownership to non-root user
-RUN chown -R 1001:1001 . && \
-    chmod +x ./codex-router-rust
-
-# Switch to non-root user
-USER 1001
-
-# Expose port
+# Expose port 8787
 EXPOSE 8787
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD wget -qO- http://localhost:8787/health || exit 1
-
-# Set environment variables
-ENV UPSTREAM_BASE_URL=https://api.scaleway.ai
-
-# Run the application
-CMD ["./codex-router-rust"]
+# Set the entrypoint
+ENTRYPOINT ["./codex-router"]
