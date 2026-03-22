@@ -5,6 +5,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use tracing::{info};
 use std::fmt;
 
 // Custom error type that implements IntoResponse
@@ -54,10 +55,18 @@ use std::env;
 // Static instance of Hyper client with TLS bypass
 static HTTP_CLIENT: OnceCell<HyperClient<HttpsConnector<HttpConnector>, Body>> = OnceCell::const_new();
 
+// Provider type
+#[derive(Clone, Debug)]
+enum Provider {
+    OpenAI,
+    Qwen,
+}
+
 // Configuration state
 #[derive(Clone)]
 struct AppState {
     upstream_base_url: String,
+    provider: Provider,
     https_client: HyperClient<HttpsConnector<HttpConnector>, Body>,
 }
 
@@ -86,6 +95,36 @@ struct AnthropicRequest {
     #[serde(default)]
     tools: Option<Vec<AnthropicTool>>,
     #[serde(default)]
+    stream: bool,
+}
+
+// Qwen API types
+#[derive(Serialize, Debug)]
+struct QwenMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(Serialize, Debug)]
+struct QwenToolCall {
+    id: String,
+    #[serde(rename = "type")]
+    type_: String,
+    function: QwenFunction,
+}
+
+#[derive(Serialize, Debug)]
+struct QwenFunction {
+    name: String,
+    arguments: String,
+}
+
+#[derive(Serialize, Debug)]
+struct QwenRequest {
+    model: String,
+    messages: Vec<QwenMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
     stream: bool,
 }
 
@@ -237,6 +276,146 @@ async fn health_check() -> Json<HealthResponse> {
         "status": "ok",
         "message": "Server is running"
     }))
+}
+
+// Convert Anthropic messages to Qwen format
+fn format_anthropic_to_qwen(req: &AnthropicRequest) -> QwenRequest {
+    let mut messages = Vec::new();
+
+    // Process system messages
+    let mut system_text = String::new();
+    if req.system.is_array() {
+        if let Some(system_array) = req.system.as_array() {
+            for item in system_array {
+                if let Some(text) = item.get("text") {
+                    if let Some(text_str) = text.as_str() {
+                        if !system_text.is_empty() {
+                            system_text.push_str("\n\n");
+                        }
+                        system_text.push_str(text_str);
+                    }
+                }
+            }
+        }
+    } else if let Some(text) = req.system.as_str() {
+        system_text.push_str(text);
+    }
+
+    // Add system message if present
+    if !system_text.is_empty() {
+        messages.push(QwenMessage {
+            role: "system".to_string(),
+            content: system_text,
+        });
+    }
+
+    // Process conversation messages
+    for msg in &req.messages {
+        match msg.role.as_str() {
+            "user" => {
+                let mut user_text = String::new();
+                let mut tool_messages = Vec::new();
+
+                if let Some(content_array) = msg.content.as_array() {
+                    for part in content_array {
+                        if let Some(text_part) = part.get("text") {
+                            let text = match text_part {
+                                Value::String(s) => s.clone(),
+                                _ => text_part.to_string(),
+                            };
+                            if !user_text.is_empty() {
+                                user_text.push_str("\n");
+                            }
+                            user_text.push_str(&text);
+                        } else if let Some(tool_result) = part.get("tool_result") {
+                            if let Some(_tool_call_id) = tool_result.get("tool_use_id").and_then(|id| id.as_str()) {
+                                let content = match tool_result.get("content") {
+                                    Some(Value::String(s)) => s.clone(),
+                                    Some(other) => other.to_string(),
+                                    None => "".to_string(),
+                                };
+
+                                tool_messages.push(QwenMessage {
+                                    role: "tool".to_string(),
+                                    content,
+                                });
+                            }
+                        }
+                    }
+                } else if let Some(text) = msg.content.as_str() {
+                    user_text.push_str(text);
+                }
+
+                // Add user message if present
+                if !user_text.is_empty() {
+                    messages.push(QwenMessage {
+                        role: "user".to_string(),
+                        content: user_text,
+                    });
+                }
+
+                // Add tool messages
+                messages.extend(tool_messages);
+            },
+            "assistant" => {
+                let mut assistant_msg = QwenMessage {
+                    role: "assistant".to_string(),
+                    content: String::new(),
+                };
+
+                let mut text_content = String::new();
+                let mut tool_calls = Vec::new();
+
+                if let Some(content_array) = msg.content.as_array() {
+                    for part in content_array {
+                        if let Some(text_part) = part.get("text") {
+                            let text = match text_part {
+                                Value::String(s) => s.clone(),
+                                _ => text_part.to_string(),
+                            };
+                            if !text_content.is_empty() {
+                                text_content.push_str("\n");
+                            }
+                            text_content.push_str(&text);
+                        } else if let Some(tool_use) = part.get("tool_use") {
+                            if let (Some(id), Some(name), Some(input)) = (
+                                tool_use.get("id").and_then(|id| id.as_str()),
+                                tool_use.get("name").and_then(|name| name.as_str()),
+                                tool_use.get("input")
+                            ) {
+                                tool_calls.push(QwenToolCall {
+                                    id: id.to_string(),
+                                    type_: "function".to_string(),
+                                    function: QwenFunction {
+                                        name: name.to_string(),
+                                        arguments: input.to_string(),
+                                    },
+                                });
+                            }
+                        }
+                    }
+                }
+
+                // Set text content if present
+                if !text_content.is_empty() {
+                    assistant_msg.content = text_content;
+                }
+
+                // Only add if there's content
+                if !assistant_msg.content.is_empty() {
+                    messages.push(assistant_msg);
+                }
+            },
+            _ => {},
+        }
+    }
+
+    QwenRequest {
+        model: req.model.clone(),
+        messages,
+        temperature: req.temperature,
+        stream: req.stream,
+    }
 }
 
 // Convert Anthropic messages to OpenAI format
@@ -481,15 +660,30 @@ fn format_openai_to_anthropic(completion: &Value, model: &str) -> AnthropicRespo
 // Handle the main messages endpoint
 #[axum::debug_handler]
 async fn handle_messages(
+    headers: axum::http::HeaderMap,
     State(state): State<AppState>,
     Json(anthropic_req): Json<AnthropicRequest>,
 ) -> Result<Response<Body>, AppError> {
-    // Convert Anthropic request to OpenAI format
-    let openai_req = format_anthropic_to_openai(&anthropic_req);
+    // Log the incoming request
+    info!("Received request: POST /v1/messages");
+    info!("Headers: {:?}", headers);
+    info!("Anthropic request: {:?}", anthropic_req);
+    info!("Provider: {:?}", state.provider);
+
+    // Convert Anthropic request based on provider
+    let upstream_body = match state.provider {
+        Provider::OpenAI => {
+            let openai_req = format_anthropic_to_openai(&anthropic_req);
+            serde_json::to_vec(&openai_req).map_err(|e| AppError(anyhow::anyhow!("Failed to serialize request: {}", e)))?
+        },
+        Provider::Qwen => {
+            let qwen_req = format_anthropic_to_qwen(&anthropic_req);
+            serde_json::to_vec(&qwen_req).map_err(|e| AppError(anyhow::anyhow!("Failed to serialize request: {}", e)))?
+        },
+    };
 
     // Prepare upstream request
     let upstream_url = format!("{}/v1/chat/completions", state.upstream_base_url);
-    let openai_body = serde_json::to_vec(&openai_req).map_err(|e| AppError(anyhow::anyhow!("Failed to serialize request: {}", e)))?;
 
     // Extract bearer token from incoming request
     // In a real implementation, this would come from the request headers
@@ -501,7 +695,7 @@ async fn handle_messages(
         .method(http::Method::POST)
         .header(http::header::CONTENT_TYPE, "application/json")
         .header(http::header::AUTHORIZATION, format!("Bearer {}", bearer_token))
-        .body(Body::from(openai_body))?;
+        .body(Body::from(upstream_body))?;
 
     // Send request to upstream
     // The request is sent but we're not actually using the response yet
@@ -510,7 +704,7 @@ async fn handle_messages(
 
     // Check if we're streaming
     if anthropic_req.stream {
-        // For streaming, we need to convert the OpenAI SSE stream to Anthropic SSE format
+        // For streaming, we need to convert the Qwen SSE stream to Anthropic SSE format
         // This is a simplified version - in a real implementation, we'd need to parse and transform the SSE stream
 
         // Create a streaming response
@@ -526,7 +720,7 @@ async fn handle_messages(
                     r#type: "message".to_string(),
                     role: "assistant".to_string(),
                     content: Vec::new(),
-                    model: openai_req.model.clone(),
+                    model: anthropic_req.model.clone(),
                     stop_reason: None,
                     stop_sequence: None,
                     usage: Usage {
@@ -621,7 +815,7 @@ async fn handle_messages(
             }],
             stop_reason: "end_turn".to_string(),
             stop_sequence: None,
-            model: openai_req.model,
+            model: anthropic_req.model,
         };
 
         Ok(Response::builder()
@@ -633,12 +827,22 @@ async fn handle_messages(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Initialize logging
-    env_logger::init();
+    // Initialize logging with DEBUG level
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("debug")
+    ).init();
 
     // Get upstream base URL from environment variable
     let upstream_base_url = env::var("UPSTREAM_BASE_URL")
-        .map_err(|_| anyhow::anyhow!("UPSTREAM_BASE_URL environment variable is required"))?;
+        .map_err(|_| anyhow::anyhow!("UPSTREAM_BASE_URL environment variable is required"))?
+        .trim_end_matches('/')
+        .to_string();
+
+    // Get provider from environment variable, default to OpenAI
+    let provider = match env::var("PROVIDER").unwrap_or_else(|_| "openai".to_string()).as_str() {
+        "qwen" | "Qwen" => Provider::Qwen,
+        _ => Provider::OpenAI,
+    };
 
     // Initialize HTTP client
     let https_client = init_http_client().await.map_err(|e| anyhow::anyhow!("Failed to initialize HTTP client: {}", e.0))?;
@@ -646,6 +850,7 @@ async fn main() -> anyhow::Result<()> {
     // Create shared application state
     let app_state = AppState {
         upstream_base_url,
+        provider,
         https_client,
     };
 

@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  proxy:
+    build: .
+    ports:
+      - "8787:8787"
+    environment:
+      - UPSTREAM_BASE_URL=https://api.scaleway.ai
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8787/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
