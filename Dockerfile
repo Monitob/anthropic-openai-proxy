@@ -1,4 +1,4 @@
-FROM rust:1.82-alpine as builder
+FROM docker.io/rust:1.82-alpine as builder
 
 # Install required packages
 RUN apk add --no-cache musl-dev pkgconfig openssl-dev
