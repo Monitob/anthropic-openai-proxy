@@ -32,6 +32,12 @@ impl From<http::Error> for AppError {
     }
 }
 
+impl From<anyhow::Error> for AppError {
+    fn from(e: anyhow::Error) -> Self {
+        AppError(e)
+    }
+}
+
 impl From<serde_json::Error> for AppError {
     fn from(e: serde_json::Error) -> Self {
         AppError(anyhow::anyhow!("JSON error: {}", e))
@@ -58,8 +64,9 @@ static HTTP_CLIENT: OnceCell<HyperClient<HttpsConnector<HttpConnector>, Body>> =
 // Provider type
 #[derive(Clone, Debug)]
 enum Provider {
+    ScalewayQwen,
+    Scaleway,
     OpenAI,
-    Qwen,
 }
 
 // Configuration state
@@ -93,9 +100,19 @@ struct AnthropicRequest {
     #[serde(default)]
     temperature: Option<f32>,
     #[serde(default)]
-    tools: Option<Vec<AnthropicTool>>,
+    top_p: Option<f32>,
+    #[serde(default)]
+    presence_penalty: Option<f32>,
+    #[serde(default)]
+    max_tokens: Option<u32>,
     #[serde(default)]
     stream: bool,
+    #[serde(default)]
+    tools: Option<Vec<AnthropicTool>>,
+    #[serde(default)]
+    reasoning_effort: Option<String>,
+    #[serde(default)]
+    response_format: Option<ResponseFormat>,
 }
 
 // Qwen API types
@@ -129,7 +146,7 @@ struct QwenRequest {
 }
 
 // OpenAI API types
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 struct OpenAIMessage {
     role: String,
     content: Option<String>,
@@ -137,41 +154,58 @@ struct OpenAIMessage {
     tool_calls: Option<Vec<OpenAIToolCall>>,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 struct OpenAIToolCall {
     id: String,
     r#type: String,
     function: OpenAIFunction,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 struct OpenAIFunction {
     name: String,
     arguments: String,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 struct OpenAITool {
     r#type: String,
     function: OpenAIToolFunction,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 struct OpenAIToolFunction {
     name: String,
     description: String,
     parameters: Value,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 struct OpenAIRequest {
     model: String,
     messages: Vec<OpenAIMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    top_p: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    presence_penalty: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<OpenAITool>>,
-    stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_format: Option<ResponseFormat>,
+}
+
+// Response format type
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct ResponseFormat {
+    r#type: String,
 }
 
 // Anthropic response types
@@ -575,8 +609,13 @@ fn format_anthropic_to_openai(req: &AnthropicRequest) -> OpenAIRequest {
         model: req.model.clone(),
         messages: openai_messages,
         temperature: req.temperature,
+        top_p: req.top_p,
+        presence_penalty: req.presence_penalty,
+        max_tokens: req.max_tokens,
+        stream: Some(req.stream), // Convert to Option<bool>
         tools: openai_tools,
-        stream: req.stream,
+        reasoning_effort: req.reasoning_effort.clone(),
+        response_format: req.response_format.clone().or(Some(ResponseFormat { r#type: "text".to_string() })), // Default to text if not specified
     }
 }
 
@@ -670,31 +709,58 @@ async fn handle_messages(
     info!("Anthropic request: {:?}", anthropic_req);
     info!("Provider: {:?}", state.provider);
 
+    // Extract API key from environment variable
+    let api_key = env::var("API_KEY").map_err(|_| anyhow::anyhow!("API_KEY environment variable is required"))?;
+    
+    // Extract default model from environment variable, with fallback to a reasonable default
+    let default_model = env::var("DEFAULT_MODEL").unwrap_or_else(|_| match state.provider {
+        Provider::ScalewayQwen => "qwen72b-chat".to_string(),
+        Provider::Scaleway => "mistral-medium".to_string(),
+        Provider::OpenAI => "gpt-3.5-turbo".to_string(),
+    });
+    
     // Convert Anthropic request based on provider
     let upstream_body = match state.provider {
-        Provider::OpenAI => {
-            let openai_req = format_anthropic_to_openai(&anthropic_req);
+        Provider::ScalewayQwen | Provider::Scaleway | Provider::OpenAI => {
+            // Create the OpenAI request
+            let mut openai_req = format_anthropic_to_openai(&anthropic_req);
+            
+            // Override the model with the one from the request or the default
+            openai_req.model = if anthropic_req.model.is_empty() {
+                default_model.clone()
+            } else {
+                anthropic_req.model.clone()
+            };
+            
+            // Serialize the request to JSON
             serde_json::to_vec(&openai_req).map_err(|e| AppError(anyhow::anyhow!("Failed to serialize request: {}", e)))?
-        },
-        Provider::Qwen => {
-            let qwen_req = format_anthropic_to_qwen(&anthropic_req);
-            serde_json::to_vec(&qwen_req).map_err(|e| AppError(anyhow::anyhow!("Failed to serialize request: {}", e)))?
         },
     };
 
     // Prepare upstream request
     let upstream_url = format!("{}/v1/chat/completions", state.upstream_base_url);
 
-    // Extract bearer token from incoming request
-    // In a real implementation, this would come from the request headers
-    let bearer_token = "dummy-token"; // This would be extracted from headers in a real implementation
+    // Extract API key from environment variable
+    let api_key = env::var("API_KEY").map_err(|_| anyhow::anyhow!("API_KEY environment variable is required"))?;
+    
+    // Extract default model from environment variable, with fallback to a reasonable default
+    let default_model = env::var("DEFAULT_MODEL").unwrap_or_else(|_| match state.provider {
+        Provider::ScalewayQwen => "qwen72b-chat".to_string(),
+        Provider::Scaleway => "mistral-medium".to_string(),
+        Provider::OpenAI => "gpt-3.5-turbo".to_string(),
+    });
 
     // Create HTTP request to upstream
     let http_request = Request::builder()
         .uri(&upstream_url)
         .method(http::Method::POST)
         .header(http::header::CONTENT_TYPE, "application/json")
-        .header(http::header::AUTHORIZATION, format!("Bearer {}", bearer_token))
+        .header(
+            http::header::AUTHORIZATION,
+            match state.provider {
+                Provider::ScalewayQwen | Provider::Scaleway | Provider::OpenAI => format!("Bearer {}", api_key),
+            }
+        )
         .body(Body::from(upstream_body))?;
 
     // Send request to upstream
@@ -710,6 +776,9 @@ async fn handle_messages(
         // Create a streaming response
         let (mut sender, body) = hyper::Body::channel();
 
+        // Clone the request data for use in the async block
+        let model = anthropic_req.model.clone();
+
         // Spawn a task to handle the streaming conversion
         tokio::spawn(async move {
 
@@ -720,7 +789,7 @@ async fn handle_messages(
                     r#type: "message".to_string(),
                     role: "assistant".to_string(),
                     content: Vec::new(),
-                    model: anthropic_req.model.clone(),
+                    model,
                     stop_reason: None,
                     stop_sequence: None,
                     usage: Usage {
@@ -838,9 +907,10 @@ async fn main() -> anyhow::Result<()> {
         .trim_end_matches('/')
         .to_string();
 
-    // Get provider from environment variable, default to OpenAI
-    let provider = match env::var("PROVIDER").unwrap_or_else(|_| "openai".to_string()).as_str() {
-        "qwen" | "Qwen" => Provider::Qwen,
+    // Get provider from environment variable, default to Scaleway
+    let provider = match env::var("PROVIDER").unwrap_or_else(|_| "scaleway".to_string()).as_str() {
+        "scaleway-qwen" | "Scaleway-Qwen" | "qwen" | "Qwen" => Provider::ScalewayQwen,
+        "scaleway" | "Scaleway" => Provider::Scaleway,
         _ => Provider::OpenAI,
     };
 

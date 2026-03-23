@@ -39,5 +39,8 @@ COPY --from=builder /app/target/release/codex-router .
 # Expose port 8787
 EXPOSE 8787
 
+# Required environment variables
+ENV API_KEY=""
+
 # Set the entrypoint
 ENTRYPOINT ["./codex-router"]

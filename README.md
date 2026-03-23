@@ -4,9 +4,9 @@ A standalone proxy that converts between Anthropic and OpenAI API formats, with 
 
 ## Features
 
-- Converts Anthropic API requests to OpenAI format and vice versa
+- Converts Anthropic API requests to Scaleway, OpenAI, and Qwen format and vice versa
 - Supports both streaming and non-streaming requests
-- Configurable upstream provider (OpenAI, Qwen, etc.)
+- Configurable upstream provider (Scaleway, OpenAI, Qwen, etc.)
 - Comprehensive logging of all incoming requests
 - End-to-end testing framework
 - Built with Rust for high performance and reliability
@@ -29,21 +29,76 @@ cargo build
 The proxy is configured using environment variables:
 
 - `UPSTREAM_BASE_URL`: The base URL of the upstream provider (required)
-- `PROVIDER`: The upstream provider to use (optional, default: "openai")
+- `PROVIDER`: The upstream provider to use (optional, default: "scaleway")
+  - "scaleway-qwen" or "qwen" - For Qwen models via Scaleway Generative AI API
+  - "scaleway" - For other Scaleway Generative AI models
   - "openai" - For OpenAI-compatible APIs
-  - "qwen" - For Qwen model API
+- `API_KEY`: Your API key for the upstream provider (required)
+- `DEFAULT_MODEL`: The default model to use when not specified in requests (optional, defaults to provider-specific models)
+  - For Scaleway Qwen: defaults to "qwen72b-chat"
+  - For Scaleway: defaults to "mistral-medium"
+  - For OpenAI: defaults to "gpt-3.5-turbo"
 
 ### Running the Server
 
 ```bash
-# For OpenAI provider (default)
-UPSTREAM_BASE_URL=https://api.openai.com cargo run
+# For Scaleway provider (default)
+UPSTREAM_BASE_URL=https://api.scaleway.ai PROVIDER=scaleway API_KEY=your_scaleway_api_key cargo run
+
+# For OpenAI provider
+UPSTREAM_BASE_URL=https://api.openai.com PROVIDER=openai API_KEY=your_openai_api_key cargo run
 
 # For Qwen provider
-UPSTREAM_BASE_URL=https://huggingface.co/Qwen/Qwen3.5-397B-A17B PROVIDER=qwen cargo run
+UPSTREAM_BASE_URL=https://huggingface.co/Qwen/Qwen3.5-397B-A17B PROVIDER=qwen API_KEY=your_huggingface_api_key cargo run
 ```
 
 The server will listen on port 8787 by default.
+
+### Qwen and Scaleway Model Examples
+
+You can use various Qwen models through Scaleway's Generative AI API. Here are examples of how to use them:
+
+```bash
+# Qwen models via Scaleway with default model
+UPSTREAM_BASE_URL=https://api.scaleway.ai PROVIDER=scaleway-qwen DEFAULT_MODEL=qwen72b-chat API_KEY=your_api_key cargo run
+
+# Use with curl - model will default to qwen72b-chat if not specified
+curl http://localhost:8787/v1/messages \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [
+      {"role": "user", "content": "Hello, how are you?"}
+    ]
+  }'
+
+# You can still override the model in individual requests
+curl http://localhost:8787/v1/messages \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen1.8b-chat",
+    "messages": [
+      {"role": "user", "content": "Hello, how are you?"}
+    ]
+  }'
+
+# Other Scaleway models with default
+UPSTREAM_BASE_URL=https://api.scaleway.ai PROVIDER=scaleway DEFAULT_MODEL=mistral-medium API_KEY=your_api_key cargo run
+
+# Mistral models (will use mistral-medium by default)
+curl http://localhost:8787/v1/messages \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [
+      {"role": "user", "content": "Hello, how are you?"}
+    ]
+  }'
+
+# Or use other Scaleway models
+# - "mistral-small"
+# - "mistral-tiny"
+# - "llama2-70b-chat"
+# - "llama2-13b-chat"
+```
 
 ## API Endpoints
 

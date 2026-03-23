@@ -4,12 +4,13 @@
 
 # Function to start the server
 start_server() {
-    local provider=${1:-openai}
+    local provider=${1:-scaleway}
     echo "Starting server with PROVIDER=$provider"
     
     # Start the server in the background
     UPSTREAM_BASE_URL=http://localhost:1234 \
     PROVIDER=$provider \
+    API_KEY=test_key \
     cargo run --quiet &
     
     # Store the process ID
@@ -40,6 +41,36 @@ stop_server() {
 # Set up trap to stop server on exit
 trap stop_server EXIT
 
+# Test with Scaleway Qwen provider
+echo "=== Testing with Scaleway Qwen provider ==="
+start_server "scaleway-qwen"
+
+# Run the tests
+if cargo test --test basic_test; then
+    echo "Scaleway Qwen provider tests passed"
+else
+    echo "Scaleway Qwen provider tests failed"
+    exit 1
+fi
+
+# Test with Scaleway provider
+echo "=== Testing with Scaleway provider ==="
+start_server "scaleway"
+
+# Run the tests
+if cargo test --test basic_test; then
+    echo "Scaleway provider tests passed"
+else
+    echo "Scaleway provider tests failed"
+    exit 1
+fi
+
+# Stop the server
+stop_server
+
+# Wait a bit before starting next server
+sleep 2
+
 # Test with OpenAI provider
 echo "=== Testing with OpenAI provider ==="
 start_server "openai"
@@ -65,6 +96,7 @@ start_server "qwen"
 # Run the tests
 if cargo test --test basic_test; then
     echo "Qwen provider tests passed"
+    exit 0
 else
     echo "Qwen provider tests failed"
     exit 1

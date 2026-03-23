@@ -8,11 +8,12 @@ use serde_json::json;
 // The test will verify that the proxy correctly forwards requests
 
 #[tokio::test]
-async fn test_proxy_with_openai_provider() {
-    // This test assumes the proxy is running with OpenAI provider
+async fn test_proxy_with_scaleway_qwen_provider() {
+    // This test assumes the proxy is running with Scaleway Qwen provider
     // Set environment variables:
     // UPSTREAM_BASE_URL=http://localhost:1234
-    // PROVIDER=openai
+    // PROVIDER=scaleway-qwen
+    // API_KEY=ignored_for_test
     
     // Give the server time to start
     sleep(Duration::from_secs(1)).await;
@@ -24,7 +25,77 @@ async fn test_proxy_with_openai_provider() {
     let response = client
         .post("http://localhost:8787/v1/messages")
         .json(&json!({
-            "model": "claude-2",
+            "model": "qwen1.8b-chat",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Hello, how are you?"
+                }
+            ]
+        }))
+        .send()
+        .await
+        .expect("Failed to send request");
+    
+    // The request should be proxied, even if the upstream is not available
+    // We're just testing that the proxy forwards correctly
+    assert!(response.status().is_success() || response.status() == reqwest::StatusCode::BAD_GATEWAY);
+}
+
+#[tokio::test]
+async fn test_proxy_with_scaleway_provider() {
+    // This test assumes the proxy is running with Scaleway provider
+    // Set environment variables:
+    // UPSTREAM_BASE_URL=http://localhost:1234
+    // PROVIDER=scaleway
+    // API_KEY=ignored_for_test
+    
+    // Give the server time to start
+    sleep(Duration::from_secs(1)).await;
+    
+    // Create a client
+    let client = reqwest::Client::new();
+    
+    // Send a request to the proxy
+    let response = client
+        .post("http://localhost:8787/v1/messages")
+        .json(&json!({
+            "model": "mistral-medium",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Hello, how are you?"
+                }
+            ]
+        }))
+        .send()
+        .await
+        .expect("Failed to send request");
+    
+    // The request should be proxied, even if the upstream is not available
+    // We're just testing that the proxy forwards correctly
+    assert!(response.status().is_success() || response.status() == reqwest::StatusCode::BAD_GATEWAY);
+}
+
+#[tokio::test]
+async fn test_proxy_with_openai_provider() {
+    // This test assumes the proxy is running with OpenAI provider
+    // Set environment variables:
+    // UPSTREAM_BASE_URL=http://localhost:1234
+    // PROVIDER=openai
+    // API_KEY=ignored_for_test
+    
+    // Give the server time to start
+    sleep(Duration::from_secs(1)).await;
+    
+    // Create a client
+    let client = reqwest::Client::new();
+    
+    // Send a request to the proxy
+    let response = client
+        .post("http://localhost:8787/v1/messages")
+        .json(&json!({
+            "model": "gpt-3.5-turbo",
             "messages": [
                 {
                     "role": "user",
@@ -47,6 +118,7 @@ async fn test_proxy_with_qwen_provider() {
     // Set environment variables:
     // UPSTREAM_BASE_URL=http://localhost:1234
     // PROVIDER=qwen
+    // API_KEY=ignored_for_test
     
     // Give the server time to start
     sleep(Duration::from_secs(1)).await;
