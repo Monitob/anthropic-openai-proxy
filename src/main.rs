@@ -964,3 +964,92 @@ async fn handle_messages(
                 if let Ok(json) = serde_json::to_string(&content_block_stop) {
                     let _ = sender.send_data(format!("event: content_block_stop\ndata: {}\n\n", json).into()).await;
                 }
+            }
+        });
+    } else {
+        // For non-streaming, we can wait for the full response and convert it
+        
+        // Create the HTTP request to upstream
+        let http_request = Request::builder()
+            .uri(&upstream_url)
+            .method(http::Method::POST)
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .header(
+                http::header::AUTHORIZATION,
+                format!("Bearer {}", api_key)
+            )
+            .body(Body::from(upstream_body))?;
+            
+        // Send the request and get the response
+        let upstream_response = state.https_client.request(http_request).await.map_err(|e| AppError(anyhow::anyhow!("Request failed: {}", e)))?;
+        
+        // Check if we got a successful response
+        if !upstream_response.status().is_success() {
+            return Err(AppError(anyhow::anyhow!("Upstream request failed with status: {}", upstream_response.status())));
+        }
+        
+        // Read the response body
+        let body_bytes = hyper::body::to_bytes(upstream_response.into_body()).await.map_err(|e| AppError(anyhow::anyhow!("Failed to read response body: {}", e)))?;
+        
+        // Parse the JSON response
+        let completion: Value = serde_json::from_slice(&body_bytes).map_err(|e| AppError(anyhow::anyhow!("Failed to parse response JSON: {}", e)))?;
+        
+        // Convert the OpenAI response to Anthropic format
+        let anthropic_response = format_openai_to_anthropic(&completion, &anthropic_req.model);
+        
+        // Return the response
+        Ok(Response::builder()
+            .status(http::StatusCode::OK)
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(&anthropic_response)?))?)
+    }
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // Initialize logging with DEBUG level
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("debug")
+    ).init();
+
+    // Get upstream base URL from environment variable
+    let upstream_base_url = env::var("UPSTREAM_BASE_URL")
+        .map_err(|_| anyhow::anyhow!("UPSTREAM_BASE_URL environment variable is required"))?
+        .trim_end_matches('/')
+        .to_string();
+
+    // Get provider from environment variable, default to Scaleway
+    let provider = match env::var("PROVIDER").unwrap_or_else(|_| "scaleway".to_string()).as_str() {
+        "scaleway-qwen" | "Scaleway-Qwen" | "qwen" | "Qwen" => Provider::ScalewayQwen,
+        "scaleway" | "Scaleway" => Provider::Scaleway,
+        _ => Provider::OpenAI,
+    };
+
+    // Initialize HTTP client
+    let https_client = init_http_client().await.map_err(|e| anyhow::anyhow!("Failed to initialize HTTP client: {}", e.0))?;
+
+    // Create shared application state
+    let app_state = AppState {
+        upstream_base_url,
+        provider,
+        https_client,
+    };
+
+    // Build our application with routes
+    let app = Router::new()
+        .route("/v1/messages", post(handle_messages))
+        .route("/health", get(health_check))
+        .with_state(app_state.clone());
+
+    // Run our application
+    let port = env::var("PORT").unwrap_or_else(|_| "8787".to_string());
+    let addr = format!("0.0.0.0:{}", port).parse::<SocketAddr>()?;
+
+    println!("🚀 qwen3.5-scw-router listening on http://{}", addr);
+    println!("   Upstream: {}", app_state.upstream_base_url);
+
+    let server = hyper::Server::bind(&addr).serve(app.into_make_service());
+    server.await?;
+
+    Ok(())
+}
