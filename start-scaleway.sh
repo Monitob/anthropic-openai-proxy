@@ -1,9 +1,14 @@
 #!/bin/bash
 
+# Source environment variables from .bashrc if it exists
+if [ -f "$HOME/.bashrc" ]; then
+    source "$HOME/.bashrc"
+fi
+
 # Default configuration for Scaleway provider
 export UPSTREAM_BASE_URL="https://api.scaleway.ai"
 export PROVIDER="scaleway-qwen"
-export DEFAULT_MODEL="qwen72b-chat"
+export DEFAULT_MODEL="qwen3.5-397b-a17b"
 
 # Check if API_KEY is set
 if [ -z "$API_KEY" ]; then
@@ -19,9 +24,11 @@ echo "Upstream URL: $UPSTREAM_BASE_URL"
 echo "Provider: $PROVIDER"
 echo "Default model: $DEFAULT_MODEL"
 
-# Run the proxy
-echo "Running cargo run..."
-cargo run
+# Build the project
+RUST_LOG=info cargo build --release
+
+# Run the proxy server
+RUST_LOG=info cargo run --release
 
 # Check if cargo run was successful
 if [ $? -eq 0 ]; then
