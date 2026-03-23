@@ -714,14 +714,63 @@ async fn handle_messages(
     
     // Extract default model from environment variable, with fallback to a reasonable default
     let default_model = env::var("DEFAULT_MODEL").unwrap_or_else(|_| match state.provider {
-        Provider::ScalewayQwen => "qwen72b-chat".to_string(),
+        Provider::ScalewayQwen => "qwen3.5-397b-a17b".to_string(),
         Provider::Scaleway => "mistral-medium".to_string(),
         Provider::OpenAI => "gpt-3.5-turbo".to_string(),
     });
     
     // Convert Anthropic request based on provider
-    let upstream_body = match state.provider {
-        Provider::ScalewayQwen | Provider::Scaleway | Provider::OpenAI => {
+    let (upstream_body, upstream_url) = match state.provider {
+        Provider::ScalewayQwen => {
+            // Create the Qwen request
+            let mut qwen_req = format_anthropic_to_qwen(&anthropic_req);
+            
+            // Override the model with the one from the request or the default
+            qwen_req.model = if anthropic_req.model.is_empty() {
+                default_model.clone()
+            } else {
+                anthropic_req.model.clone()
+            };
+            
+            // Serialize the request to JSON
+            let body = serde_json::to_vec(&qwen_req).map_err(|e| AppError(anyhow::anyhow!("Failed to serialize request: {}", e)))?;
+            
+            // Prepare upstream request
+            let url = format!("{}/v1/chat/completions", state.upstream_base_url);
+            
+            (body, url)
+        },
+        Provider::Scaleway | Provider::OpenAI => {
+            // Create the OpenAI request
+            let mut openai_req = format_anthropic_to_openai(&anthropic_req);
+            
+            // Override the model with the one from the request or the default
+            openai_req.model = if anthropic_req.model.is_empty() {
+                defaultor::OpenAI => "gpt-3.5-turbo".to_string(),
+    });
+    
+    // Convert Anthropic request based on provider
+    let (upstream_body, upstream_url) = match state.provider {
+        Provider::ScalewayQwen => {
+            // Create the Qwen request
+            let mut qwen_req = format_anthropic_to_qwen(&anthropic_req);
+            
+            // Override the model with the one from the request or the default
+            qwen_req.model = if anthropic_req.model.is_empty() {
+                default_model.clone()
+            } else {
+                anthropic_req.model.clone()
+            };
+            
+            // Serialize the request to JSON
+            let body = serde_json::to_vec(&qwen_req).map_err(|e| AppError(anyhow::anyhow!("Failed to serialize request: {}", e)))?;
+            
+            // Prepare upstream request
+            let url = format!("{}/v1/chat/completions", state.upstream_base_url);
+            
+            (body, url)
+        },
+        Provider::Scaleway | Provider::OpenAI => {
             // Create the OpenAI request
             let mut openai_req = format_anthropic_to_openai(&anthropic_req);
             
@@ -733,22 +782,14 @@ async fn handle_messages(
             };
             
             // Serialize the request to JSON
-            serde_json::to_vec(&openai_req).map_err(|e| AppError(anyhow::anyhow!("Failed to serialize request: {}", e)))?
+            let body = serde_json::to_vec(&openai_req).map_err(|e| AppError(anyhow::anyhow!("Failed to serialize request: {}", e)))?;
+            
+            // Prepare upstream request
+            let url = format!("{}/v1/chat/completions", state.upstream_base_url);
+            
+            (body, url)
         },
     };
-
-    // Prepare upstream request
-    let upstream_url = format!("{}/v1/chat/completions", state.upstream_base_url);
-
-    // Extract API key from environment variable
-    let api_key = env::var("API_KEY").map_err(|_| anyhow::anyhow!("API_KEY environment variable is required"))?;
-    
-    // Extract default model from environment variable, with fallback to a reasonable default
-    let default_model = env::var("DEFAULT_MODEL").unwrap_or_else(|_| match state.provider {
-        Provider::ScalewayQwen => "qwen72b-chat".to_string(),
-        Provider::Scaleway => "mistral-medium".to_string(),
-        Provider::OpenAI => "gpt-3.5-turbo".to_string(),
-    });
 
     // Create HTTP request to upstream
     let http_request = Request::builder()
@@ -757,22 +798,12 @@ async fn handle_messages(
         .header(http::header::CONTENT_TYPE, "application/json")
         .header(
             http::header::AUTHORIZATION,
-            match state.provider {
-                Provider::ScalewayQwen | Provider::Scaleway | Provider::OpenAI => format!("Bearer {}", api_key),
-            }
+            format!("Bearer {}", api_key)
         )
         .body(Body::from(upstream_body))?;
 
-    // Send request to upstream
-    // The request is sent but we're not actually using the response yet
-    // In a real implementation, we would process the response
-    state.https_client.request(http_request).await.map_err(|e| AppError(anyhow::anyhow!("Request failed: {}", e)))?;
-
     // Check if we're streaming
     if anthropic_req.stream {
-        // For streaming, we need to convert the Qwen SSE stream to Anthropic SSE format
-        // This is a simplified version - in a real implementation, we'd need to parse and transform the SSE stream
-
         // Create a streaming response
         let (mut sender, body) = hyper::Body::channel();
 
@@ -780,7 +811,24 @@ async fn handle_messages(
         let model = anthropic_req.model.clone();
 
         // Spawn a task to handle the streaming conversion
+        let client = state.https_client.clone();
         tokio::spawn(async move {
+            // Send the upstream request and get the response
+            let upstream_response = match client.request(http_request).await {
+                Ok(resp) => resp,
+                Err(e) => {
+                    let _ = sender.send_data(format!("event: error\ndata: {{\"type\":\"error\",\"error\":{{\"type\":\"api_error\",\"message\":\"{}\"}}}}\n\n", e).into()).await;
+                    let _ = sender.send_trailers(hyper::HeaderMap::new()).await;
+                    return;
+                }
+            };
+
+            // Check if we got a successful response
+            if !upstream_response.status().is_success() {
+                let _ = sender.send_data(format!("event: error\ndata: {{\"type\":\"error\",\"error\":{{\"type\":\"api_error\",\"message\":\"HTTP {}\"}}}}\n\n", upstream_response.status()).into()).await;
+                let _ = sender.send_trailers(hyper::HeaderMap::new()).await;
+                return;
+            }
 
             // Send message_start event
             let message_start = SSEEvent::MessageStart {
@@ -803,142 +851,108 @@ async fn handle_messages(
                 let _ = sender.send_data(format!("event: message_start\ndata: {}\n\n", json).into()).await;
             }
 
-            // In a real implementation, we would read from the upstream SSE stream and transform events
-            // For now, we'll send a simple text delta as an example
-            let content_block_start = SSEEvent::ContentBlockStart {
-                index: 0,
-                content_block: ContentBlockStart {
-                    content: ContentBlock::Text { text: "".to_string() },
-                },
-            };
+            // Create a stream from the response body
+            let upstream_body = upstream_response.into_body();
+            let mut upstream_stream = upstream_body.into_data_stream();
 
-            if let Ok(json) = serde_json::to_string(&content_block_start) {
-                let _ = sender.send_data(format!("event: content_block_start\ndata: {}\n\n", json).into()).await;
-            }
+            // Process the SSE stream from the upstream
+            let mut content_block_started = false;
+            let mut input_tokens = 0;
+            let mut output_tokens = 0;
 
-            // Example text delta
-            let content_block_delta = SSEEvent::ContentBlockDelta {
-                index: 0,
-                delta: ContentBlockDelta::TextDelta {
-                    type_: "text_delta".to_string(),
-                    text: "Hello from Rust proxy!".to_string(),
-                },
-            };
+            while let Some(chunk_result) = upstream_stream.next().await {
+                match chunk_result {
+                    Ok(chunk) => {
+                        // Parse the SSE event
+                        let lines: Vec<&str> = chunk.split("\n").collect();
+                        
+                        let mut event_type = None;
+                        let mut data = None;
+                        
+                        for line in lines {
+                            if line.starts_with("event:") {
+                                event_type = Some(line.trim_start_matches("event:").trim().to_string());
+                            } else if line.starts_with("data:") {
+                                let data_str = line.trim_start_matches("data:").trim();
+                                if data_str != "[DONE]" {
+                                    data = Some(data_str.to_string());
+                                }
+                            }
+                        }
+                        
+                        if let (Some(event), Some(data_str)) = (event_type, data) {
+                            match event.as_str() {
+                                "chat.completion.chunk" => {
+                                    // Parse the OpenAI chunk
+                                    match serde_json::from_str::<Value>(&data_str) {
+                                        Ok(chunk_data) => {
+                                            // Extract content if present
+                                            if let Some(choices) = chunk_data.get("choices").and_then(|c| c.as_array()) {
+                                                for choice in choices {
+                                                    if let Some(delta) = choice.get("delta") {
+                                                        // Handle text content
+                                                        if let Some(text_content) = delta.get("content").and_then(|c| c.as_str()) {
+                                                            if !content_block_started {
+                                                                // Send content_block_start
+                                                                let content_block_start = SSEEvent::ContentBlockStart {
+                                                                    index: 0,
+                                                                    content_block: ContentBlockStart {
+                                                                        content: ContentBlock::Text { text: "".to_string() },
+                                                                    },
+                                                                };
 
-            if let Ok(json) = serde_json::to_string(&content_block_delta) {
-                let _ = sender.send_data(format!("event: content_block_delta\ndata: {}\n\n", json).into()).await;
-            }
+                                                                if let Ok(json) = serde_json::to_string(&content_block_start) {
+                                                                    let _ = sender.send_data(format!("event: content_block_start\ndata: {}\n\n", json).into()).await;
+                                                                    content_block_started = true;
+                                                                }
+                                                            }
 
-            // Close the content block
-            let content_block_stop = SSEEvent::ContentBlockStop { index: 0 };
+                                                            // Send content_block_delta
+                                                            let content_block_delta = SSEEvent::ContentBlockDelta {
+                                                                index: 0,
+                                                                delta: ContentBlockDelta::TextDelta {
+                                                                    type_: "text_delta".to_string(),
+                                                                    text: text_content.to_string(),
+                                                                },
+                                                            };
 
-            if let Ok(json) = serde_json::to_string(&content_block_stop) {
-                let _ = sender.send_data(format!("event: content_block_stop\ndata: {}\n\n", json).into()).await;
-            }
-
-            // Send message_delta with stop reason
-            let message_delta = SSEEvent::MessageDelta {
-                delta: MessageDelta {
-                    stop_reason: "end_turn".to_string(),
-                    stop_sequence: None,
-                    usage: Usage {
-                        input_tokens: 100,
-                        output_tokens: 150,
+                                                            if let Ok(json) = serde_json::to_string(&content_block_delta) {
+                                                                let _ = sender.send_data(format!("event: content_block_delta\ndata: {}\n\n", json).into()).await;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        },
+                                        Err(e) => {
+                                            // Log the error but continue processing
+                                            eprintln!("Failed to parse OpenAI chunk: {}", e);
+                                        }
+                                    }
+                                },
+                                "error" => {
+                                    // Forward the error event
+                                    let _ = sender.send_data(format!("event: error\ndata: {}\n\n", data_str).into()).await;
+                                },
+                                _ => {
+                                    // Forward other events
+                                    let _ = sender.send_data(format!("event: {}\ndata: {}\n\n", event, data_str).into()).await;
+                                }
+                            }
+                        }
                     },
-                },
-            };
-
-            if let Ok(json) = serde_json::to_string(&message_delta) {
-                let _ = sender.send_data(format!("event: message_delta\ndata: {}\n\n", json).into()).await;
+                    Err(e) => {
+                        // Log the error but continue processing
+                        eprintln!("Error reading upstream stream: {}", e);
+                        break;
+                    }
+                }
             }
 
-            // Send message_stop
-            let message_stop = SSEEvent::MessageStop;
+            // Close the content block if it was started
+            if content_block_started {
+                let content_block_stop = SSEEvent::ContentBlockStop { index: 0 };
 
-            if let Ok(json) = serde_json::to_string(&message_stop) {
-                let _ = sender.send_data(format!("event: message_stop\ndata: {}\n\n", json).into()).await;
-            }
-
-            // Close the sender
-            let _ = sender.send_trailers(hyper::HeaderMap::new()).await;
-        });
-
-        Ok(Response::builder()
-            .status(http::StatusCode::OK)
-            .header(http::header::CONTENT_TYPE, "text/event-stream")
-            .header(http::header::CACHE_CONTROL, "no-cache")
-            .header(http::header::CONNECTION, "keep-alive")
-            .body(body)?)
-    } else {
-        // For non-streaming, we can wait for the full response and convert it
-        // This is a simplified version - we're not actually making the upstream call yet
-
-        // In a real implementation, we would wait for the full response from the upstream
-        // For now, we'll return a placeholder response
-        let anthropic_response = AnthropicResponse {
-            id: format!("msg_{}", chrono::Utc::now().timestamp_millis()),
-            r#type: "message".to_string(),
-            role: "assistant".to_string(),
-            content: vec![ContentBlock::Text {
-                text: "Response from Rust proxy".to_string(),
-            }],
-            stop_reason: "end_turn".to_string(),
-            stop_sequence: None,
-            model: anthropic_req.model,
-        };
-
-        Ok(Response::builder()
-            .status(http::StatusCode::OK)
-            .header(http::header::CONTENT_TYPE, "application/json")
-            .body(Body::from(serde_json::to_vec(&anthropic_response)?))?)
-    }
-}
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    // Initialize logging with DEBUG level
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("debug")
-    ).init();
-
-    // Get upstream base URL from environment variable
-    let upstream_base_url = env::var("UPSTREAM_BASE_URL")
-        .map_err(|_| anyhow::anyhow!("UPSTREAM_BASE_URL environment variable is required"))?
-        .trim_end_matches('/')
-        .to_string();
-
-    // Get provider from environment variable, default to Scaleway
-    let provider = match env::var("PROVIDER").unwrap_or_else(|_| "scaleway".to_string()).as_str() {
-        "scaleway-qwen" | "Scaleway-Qwen" | "qwen" | "Qwen" => Provider::ScalewayQwen,
-        "scaleway" | "Scaleway" => Provider::Scaleway,
-        _ => Provider::OpenAI,
-    };
-
-    // Initialize HTTP client
-    let https_client = init_http_client().await.map_err(|e| anyhow::anyhow!("Failed to initialize HTTP client: {}", e.0))?;
-
-    // Create shared application state
-    let app_state = AppState {
-        upstream_base_url,
-        provider,
-        https_client,
-    };
-
-    // Build our application with routes
-    let app = Router::new()
-        .route("/v1/messages", post(handle_messages))
-        .route("/health", get(health_check))
-        .with_state(app_state.clone());
-
-    // Run our application
-    let port = env::var("PORT").unwrap_or_else(|_| "8787".to_string());
-    let addr = format!("0.0.0.0:{}", port).parse::<SocketAddr>()?;
-
-    println!("🚀 qwen3.5-scw-router listening on http://{}", addr);
-    println!("   Upstream: {}", app_state.upstream_base_url);
-
-    let server = hyper::Server::bind(&addr).serve(app.into_make_service());
-    server.await?;
-
-    Ok(())
-}
+                if let Ok(json) = serde_json::to_string(&content_block_stop) {
+                    let _ = sender.send_data(format!("event: content_block_stop\ndata: {}\n\n", json).into()).await;
+                }
