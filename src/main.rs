@@ -746,11 +746,19 @@ async fn handle_messages(
             
             // Override the model with the one from the request or the default
             openai_req.model = if anthropic_req.model.is_empty() {
-                defaultor::OpenAI => "gpt-3.5-turbo".to_string(),
-    });
-    
-    // Convert Anthropic request based on provider
-    let (upstream_body, upstream_url) = match state.provider {
+                default_model.clone()
+            } else {
+                anthropic_req.model.clone()
+            };
+            
+            // Serialize the request to JSON
+            let body = serde_json::to_vec(&openai_req).map_err(|e| AppError(anyhow::anyhow!("Failed to serialize request: {}", e)))?;
+            
+            // Prepare upstream request
+            let url = format!("{}/v1/chat/completions", state.upstream_base_url);
+            
+            (body, url)
+        },
         Provider::ScalewayQwen => {
             // Create the Qwen request
             let mut qwen_req = format_anthropic_to_qwen(&anthropic_req);
