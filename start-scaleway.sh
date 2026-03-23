@@ -1,9 +1,27 @@
 #!/bin/bash
 
+# Debug: Show if we're in an interactive shell
+if [[ $- == *i* ]]; then
+    echo "Interactive shell detected"
+else
+    echo "Non-interactive shell detected"
+fi
+
+# Debug: Show current environment variables related to API
+echo "Current environment variables containing 'API':"
+env | grep -i api || echo "No API-related variables found"
+
 # Source environment variables from .bashrc if it exists
 if [ -f "$HOME/.bashrc" ]; then
+    echo "Sourcing $HOME/.bashrc"
     source "$HOME/.bashrc"
+else
+    echo "$HOME/.bashrc not found"
 fi
+
+# Debug: Show environment variables after sourcing
+echo "Environment variables after sourcing .bashrc (containing 'API'):":
+env | grep -i api || echo "No API-related variables found after sourcing"
 
 # Default configuration for Scaleway provider
 export UPSTREAM_BASE_URL="https://api.scaleway.ai"
