@@ -861,7 +861,7 @@ async fn handle_messages(
 
             // Create a stream from the response body
             let upstream_body = upstream_response.into_body();
-            let mut upstream_stream = upstream_body.into_data_stream();
+            let mut upstream_stream = upstream_body.into_stream();
 
             // Process the SSE stream from the upstream
             let mut content_block_started = false;
@@ -871,8 +871,11 @@ async fn handle_messages(
             while let Some(chunk_result) = upstream_stream.next().await {
                 match chunk_result {
                     Ok(chunk) => {
+                        // Convert chunk to string
+                        let chunk_str = String::from_utf8_lossy(&chunk);
+                        
                         // Parse the SSE event
-                        let lines: Vec<&str> = chunk.split("\n").collect();
+                        let lines: Vec<&str> = chunk_str.split("\n").collect();
                         
                         let mut event_type = None;
                         let mut data = None;
@@ -965,7 +968,18 @@ async fn handle_messages(
                     let _ = sender.send_data(format!("event: content_block_stop\ndata: {}\n\n", json).into()).await;
                 }
             }
-        });
+            
+            // Close the sender
+            let _ = sender.send_trailers(hyper::HeaderMap::new()).await;
+            
+            // Return the streaming response
+            return Ok(Response::builder()
+                .status(http::StatusCode::OK)
+                .header(http::header::CONTENT_TYPE, "text/event-stream")
+                .header(http::header::CACHE_CONTROL, "no-cache")
+                .header(http::header::CONNECTION, "keep-alive")
+                .body(body)?);
+        }
     } else {
         // For non-streaming, we can wait for the full response and convert it
         
