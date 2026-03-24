@@ -52,15 +52,11 @@ impl From<hyper::Error> for AppError {
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::net::SocketAddr;
-use tokio::sync::OnceCell;
 use hyper::{Body, client::{Client as HyperClient, HttpConnector}};
 use hyper_tls::HttpsConnector;
 use std::env;
 use futures_util::stream::TryStreamExt;
 use futures_util::StreamExt;
-
-// Static instance of Hyper client with TLS bypass
-static HTTP_CLIENT: OnceCell<HyperClient<HttpsConnector<HttpConnector>, Body>> = OnceCell::const_new();
 
 // Provider type
 #[derive(Clone, Debug)]
@@ -246,10 +242,6 @@ enum SSEEvent {
     ContentBlockDelta { index: usize, delta: ContentBlockDelta },
     #[serde(rename = "content_block_stop")]
     ContentBlockStop { index: usize },
-    #[serde(rename = "message_delta")]
-    MessageDelta { delta: MessageDelta },
-    #[serde(rename = "message_stop")]
-    MessageStop,
 }
 
 #[derive(Serialize, Debug)]
@@ -274,14 +266,6 @@ struct ContentBlockStart {
 #[serde(untagged)]
 enum ContentBlockDelta {
     TextDelta { type_: String, text: String },
-    InputJsonDelta { type_: String, partial_json: String },
-}
-
-#[derive(Serialize, Debug)]
-struct MessageDelta {
-    stop_reason: String,
-    stop_sequence: Option<String>,
-    usage: Usage,
 }
 
 #[derive(Serialize, Debug)]
