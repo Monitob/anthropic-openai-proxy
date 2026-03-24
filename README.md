@@ -141,6 +141,48 @@ The proxy is built with the following components:
 - **Tokio**: Async runtime
 - **Tower/Tower-HTTP**: Middleware framework
 
+## Docker Deployment
+
+The project includes Docker support for easy deployment in containerized environments:
+
+### Simple Deployment
+
+For production use, the recommended approach is to build the binary locally and use the simple Dockerfile:
+
+```bash
+# Build the release binary
+cargo build --release
+
+# Copy the binary to the target location
+cp target/release/codex-router .
+
+# Build the Docker image
+docker build -f Dockerfile.simple -t codex-router .
+```
+
+### Build with Docker
+
+Alternatively, you can build everything with Docker using the build Dockerfile:
+
+```bash
+# Build with Docker
+docker build -f Dockerfile.build -t codex-router .
+```
+
+### Running with Docker
+
+```bash
+# Run with Scaleway provider
+docker run -d \
+  -p 8787:8787 \
+  -e UPSTREAM_BASE_URL=https://api.scaleway.ai \
+  -e PROVIDER=scaleway-qwen \
+  -e API_KEY=your_api_key \
+  -e DEFAULT_MODEL=qwen3.5-397b-a17b \
+  --name codex-router \
+  codex-router
+```
+
 ## Contributing
 
 Contributions are welcome! Please feel free to submit issues or pull requests.
