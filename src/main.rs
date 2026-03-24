@@ -54,9 +54,10 @@ use serde_json::{json, Value};
 use std::net::SocketAddr;
 use tokio::sync::OnceCell;
 use hyper::{Body, client::{Client as HyperClient, HttpConnector}};
-use tokio_native_tls;
 use hyper_tls::HttpsConnector;
 use std::env;
+use futures_util::stream::TryStreamExt;
+use futures_util::StreamExt;
 
 // Static instance of Hyper client with TLS bypass
 static HTTP_CLIENT: OnceCell<HyperClient<HttpsConnector<HttpConnector>, Body>> = OnceCell::const_new();
@@ -770,7 +771,7 @@ async fn handle_messages(
             http::header::AUTHORIZATION,
             format!("Bearer {}", api_key)
         )
-        .body(Body::from(upstream_body))?;
+        .body(Body::from(upstream_body.clone()))?;
 
     // Check if we're streaming
     if anthropic_req.stream {
@@ -827,8 +828,8 @@ async fn handle_messages(
 
             // Process the SSE stream from the upstream
             let mut content_block_started = false;
-            let mut input_tokens = 0;
-            let mut output_tokens = 0;
+            let mut _input_tokens = 0;
+            let mut _output_tokens = 0;
 
             while let Some(chunk_result) = upstream_stream.next().await {
                 match chunk_result {
@@ -934,14 +935,17 @@ async fn handle_messages(
             // Close the sender
             let _ = sender.send_trailers(hyper::HeaderMap::new()).await;
             
-            // Return the streaming response
-            return Ok(Response::builder()
-                .status(http::StatusCode::OK)
-                .header(http::header::CONTENT_TYPE, "text/event-stream")
-                .header(http::header::CACHE_CONTROL, "no-cache")
-                .header(http::header::CONNECTION, "keep-alive")
-                .body(body)?);
-        }
+            // The response is sent through the sender, so we just return
+            ()
+        });
+
+        // Return the streaming response
+        return Ok(Response::builder()
+            .status(http::StatusCode::OK)
+            .header(http::header::CONTENT_TYPE, "text/event-stream")
+            .header(http::header::CACHE_CONTROL, "no-cache")
+            .header(http::header::CONNECTION, "keep-alive")
+            .body(body)?);
     } else {
         // For non-streaming, we can wait for the full response and convert it
         
@@ -954,7 +958,7 @@ async fn handle_messages(
                 http::header::AUTHORIZATION,
                 format!("Bearer {}", api_key)
             )
-            .body(Body::from(upstream_body))?;
+            .body(Body::from(upstream_body.clone()))?;
             
         // Send the request and get the response
         let upstream_response = state.https_client.request(http_request).await.map_err(|e| AppError(anyhow::anyhow!("Request failed: {}", e)))?;

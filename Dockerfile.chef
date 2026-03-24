@@ -1,0 +1,27 @@
+FROM lukemathwalker/cargo-chef:latest-alpine-3.18-rust-1.82 as chef
+
+WORKDIR /app
+
+FROM chef as planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef as cacher
+COPY . .
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json
+
+FROM chef as builder
+WORKDIR /app
+COPY . .
+COPY --from=cacher /app/target target
+RUN cargo build --release --bin codex-router
+
+FROM alpine:3.18 as runtime
+RUN apk --no-cache add ca-certificates
+WORKDIR /app
+RUN addgroup -S app && adduser -S app -G app
+USER app
+COPY --from=builder /app/target/release/codex-router .
+EXPOSE 8787
+CMD ["./codex-router"]
